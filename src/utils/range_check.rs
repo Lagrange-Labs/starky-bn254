@@ -9,12 +9,9 @@ use plonky2::{
 
 use super::lookup::{eval_lookups, eval_lookups_circuit, permuted_cols};
 use crate::constants::LIMB_BITS;
+use crate::types::{StarkEvaluationTargets, StarkEvaluationVars};
 
-use starky::{
-    constraint_consumer::{ConstraintConsumer, RecursiveConstraintConsumer},
-    permutation::PermutationPair,
-    vars::{StarkEvaluationTargets, StarkEvaluationVars},
-};
+use starky::constraint_consumer::{ConstraintConsumer, RecursiveConstraintConsumer};
 
 /// 1 + 2*target_cols.len()
 pub fn generate_u16_range_check<F: RichField>(
@@ -91,25 +88,6 @@ pub fn eval_u16_range_check_circuit<F: RichField + Extendable<D>, const D: usize
         builder.constant_extension(F::Extension::from_canonical_usize((1 << LIMB_BITS) - 1));
     let t = builder.sub_extension(cur_table, range_max);
     yield_constr.constraint_last_row(builder, t);
-}
-
-pub fn u16_range_check_pairs(
-    start_lookups: usize,
-    target_cols: Range<usize>,
-) -> Vec<PermutationPair> {
-    let mut pairs = vec![];
-
-    for (i, pos) in target_cols.enumerate() {
-        // table
-        pairs.push(PermutationPair::singletons(
-            start_lookups,
-            start_lookups + 1 + 2 * i + 1,
-        ));
-
-        // cols
-        pairs.push(PermutationPair::singletons(pos, start_lookups + 1 + 2 * i));
-    }
-    pairs
 }
 
 /// 1 + 6*target_cols.len()
@@ -225,22 +203,4 @@ pub fn eval_split_u16_range_check_circuit<F: RichField + Extendable<D>, const D:
     let range_max = builder.constant_extension(F::Extension::from_canonical_usize((1 << 8) - 1));
     let t = builder.sub_extension(cur_table, range_max);
     yield_constr.constraint_last_row(builder, t);
-}
-
-pub fn split_u16_range_check_pairs(
-    main_col: usize,
-    target_cols: Range<usize>,
-) -> Vec<PermutationPair> {
-    let mut pairs = vec![];
-
-    for i in (main_col + 1..main_col + 1 + 6 * target_cols.len()).step_by(6) {
-        // table
-        pairs.push(PermutationPair::singletons(main_col, i + 2));
-        pairs.push(PermutationPair::singletons(main_col, i + 5));
-
-        // cols
-        pairs.push(PermutationPair::singletons(i, i + 1));
-        pairs.push(PermutationPair::singletons(i + 3, i + 4));
-    }
-    pairs
 }

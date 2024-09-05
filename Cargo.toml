@@ -16,7 +16,7 @@ anyhow = { version = "1.0.40", default-features = false }
 itertools = { version = "0.10.0"}
 log = { version = "0.4.14", default-features = false }
 plonky2 = "0.2.2"
-plonky2-bn254 = { git = "https://github.com/Lagrange-Labs/plonky2-bn254", branch = "update-plonky2" }
+plonky2-bn254 = { git = "https://github.com/Lagrange-Labs/plonky2-bn254", branch = "lsc-plonky2-patch" }
 plonky2_maybe_rayon = { git = "https://github.com/Lagrange-Labs/plonky2", branch = "starky-bn254-update" }
 starky = { git = "https://github.com/Lagrange-Labs/plonky2", branch = "starky-bn254-update" }
 static_assertions = "1.1.0"

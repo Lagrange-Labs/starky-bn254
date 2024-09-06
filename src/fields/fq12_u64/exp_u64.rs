@@ -3,6 +3,22 @@
 //<------------------------------------------------->main_cols: 108*N_LIMBS + 6
 //                           <--------->range_check(start: 24*N_LIMBS, end: 108*N_LIMBS-12))
 
+pub const fn num_columns(num_io: usize) -> usize {
+    let start_flags_col = 108 * N_LIMBS;
+    let num_main_cols = start_flags_col + NUM_FLAGS_U64_COLS;
+
+    let start_io_pulses_col = num_main_cols;
+    let start_lookups_col = start_io_pulses_col + 1 + 4 * num_io;
+
+    let num_range_check_cols = 84 * N_LIMBS - 12;
+
+    start_lookups_col + 1 + 6 * num_range_check_cols
+}
+
+pub const fn num_public_inputs(num_io: usize) -> usize {
+    FQ12_EXP_U64_IO_LEN * num_io
+}
+
 pub struct ExpU64StarkConstants {
     pub num_columns: usize,
     pub num_public_inputs: usize,
@@ -16,7 +32,7 @@ pub struct ExpU64StarkConstants {
     pub num_range_check_cols: usize,
 }
 
-fn constants(num_io: usize) -> ExpU64StarkConstants {
+const fn constants(num_io: usize) -> ExpU64StarkConstants {
     let start_flags_col = 108 * N_LIMBS;
     let num_main_cols = start_flags_col + NUM_FLAGS_U64_COLS;
 
@@ -58,7 +74,7 @@ use crate::{
     utils::pulse::{eval_pulse, eval_pulse_circuit, generate_pulse, get_pulse_col},
     utils::range_check::{
         eval_split_u16_range_check, eval_split_u16_range_check_circuit,
-        generate_split_u16_range_check, split_u16_range_check_pairs,
+        generate_split_u16_range_check,
     },
     utils::utils::{
         columns_to_fq12, fq_to_columns, fq_to_u16_columns, i64_to_column_positive, read_u16_fq,
@@ -74,17 +90,18 @@ use plonky2::{
         polynomial::PolynomialValues,
     },
     hash::hash_types::RichField,
+    iop::ext_target::ExtensionTarget,
     plonk::circuit_builder::CircuitBuilder,
     util::transpose,
 };
 
+use crate::types::{StarkEvaluationTargets, StarkEvaluationVars};
 use plonky2_bn254::fields::native::MyFq12;
 use starky::{
     config::StarkConfig,
     constraint_consumer::{ConstraintConsumer, RecursiveConstraintConsumer},
-    permutation::PermutationPair,
+    evaluation_frame::{StarkEvaluationFrame, StarkFrame},
     stark::Stark,
-    vars::{StarkEvaluationTargets, StarkEvaluationVars},
 };
 
 use super::flags_u64::{eval_flags_u64, eval_flags_u64_circuit, NUM_FLAGS_U64_COLS};
@@ -231,26 +248,25 @@ pub fn get_pulse_u64_positions(num_io: usize) -> Vec<usize> {
 }
 
 #[derive(Clone, Copy)]
-pub struct Fq12ExpU64Stark<F: RichField + Extendable<D>, const D: usize> {
-    pub num_io: usize,
+pub struct Fq12ExpU64Stark<F: RichField + Extendable<D>, const D: usize, const NUM_IO: usize> {
     _phantom: PhantomData<F>,
 }
 
-impl<F: RichField + Extendable<D>, const D: usize> Fq12ExpU64Stark<F, D> {
-    pub fn new(num_io: usize) -> Self {
+impl<F: RichField + Extendable<D>, const D: usize, const NUM_IO: usize>
+    Fq12ExpU64Stark<F, D, NUM_IO>
+{
+    pub fn new() -> Self {
         Self {
-            num_io,
             _phantom: PhantomData,
         }
     }
 
     pub fn constants(&self) -> ExpU64StarkConstants {
-        constants(self.num_io)
+        constants(NUM_IO)
     }
 
     pub fn config(&self) -> StarkConfig {
-        let c = self.constants();
-        StarkConfig::standard_fast_config(c.num_columns, c.num_public_inputs)
+        StarkConfig::standard_fast_config()
     }
 
     pub fn generate_trace_for_one_block(&self, x: Fq12, offset: Fq12, exp_val: u64) -> Vec<Vec<F>> {
@@ -311,10 +327,27 @@ impl<F: RichField + Extendable<D>, const D: usize> Fq12ExpU64Stark<F, D> {
     }
 }
 
-impl<F: RichField + Extendable<D>, const D: usize> Stark<F, D> for Fq12ExpU64Stark<F, D> {
+impl<F: RichField + Extendable<D>, const D: usize, const NUM_IO: usize> Stark<F, D>
+    for Fq12ExpU64Stark<F, D, NUM_IO>
+where
+    [(); num_columns(NUM_IO)]:,
+    [(); num_public_inputs(NUM_IO)]:,
+{
+    type EvaluationFrame<FE, P, const D2: usize> = StarkFrame<P, P::Scalar, { num_columns(NUM_IO) }, { num_public_inputs(NUM_IO) }>
+    where
+        FE: FieldExtension<D2, BaseField = F>,
+        P: PackedField<Scalar = FE>;
+
+    type EvaluationFrameTarget = StarkFrame<
+        ExtensionTarget<D>,
+        ExtensionTarget<D>,
+        { num_columns(NUM_IO) },
+        { num_public_inputs(NUM_IO) },
+    >;
+
     fn eval_packed_generic<FE, P, const D2: usize>(
         &self,
-        vars: StarkEvaluationVars<FE, P>,
+        vars: &Self::EvaluationFrame<FE, P, D2>,
         yield_constr: &mut ConstraintConsumer<P>,
     ) where
         FE: FieldExtension<D2, BaseField = F>,
@@ -326,8 +359,8 @@ impl<F: RichField + Extendable<D>, const D: usize> Stark<F, D> for Fq12ExpU64Sta
         let is_mul_col = c.start_flags_col + 3;
         let exp_val_col = c.start_flags_col + 5;
 
-        let lv = vars.local_values;
-        let nv = vars.next_values;
+        let lv = vars.get_local_values();
+        let nv = vars.get_next_values();
 
         let mut cur_col = 0;
         let a = read_fq12(lv, &mut cur_col);
@@ -346,7 +379,11 @@ impl<F: RichField + Extendable<D>, const D: usize> Stark<F, D> for Fq12ExpU64Sta
         yield_constr.constraint(is_final - sum_is_output);
 
         // public inputs
-        let pi: &[P] = &vars.public_inputs.iter().map(|&x| x.into()).collect_vec();
+        let pi: &[P] = &vars
+            .get_public_inputs()
+            .iter()
+            .map(|&x| x.into())
+            .collect_vec();
         cur_col = 0;
         for i in (0..2 * c.num_io).step_by(2) {
             let fq12_exp_io = read_fq12_exp_u64_io(pi, &mut cur_col);
@@ -389,17 +426,22 @@ impl<F: RichField + Extendable<D>, const D: usize> Stark<F, D> for Fq12ExpU64Sta
         // flags and lookup
         eval_flags_u64(
             yield_constr,
-            vars.local_values,
-            vars.next_values,
+            vars.get_local_values(),
+            vars.get_next_values(),
             c.start_flags_col,
         );
         eval_pulse(
             yield_constr,
-            vars.local_values,
-            vars.next_values,
+            vars.get_local_values(),
+            vars.get_next_values(),
             c.start_io_pulses_col,
             get_pulse_u64_positions(c.num_io),
         );
+        let vars = StarkEvaluationVars {
+            local_values: vars.get_local_values(),
+            next_values: vars.get_next_values(),
+            public_inputs: vars.get_public_inputs(),
+        };
         eval_split_u16_range_check(
             vars,
             yield_constr,
@@ -411,7 +453,7 @@ impl<F: RichField + Extendable<D>, const D: usize> Stark<F, D> for Fq12ExpU64Sta
     fn eval_ext_circuit(
         &self,
         builder: &mut CircuitBuilder<F, D>,
-        vars: StarkEvaluationTargets<D>,
+        vars: &Self::EvaluationFrameTarget,
         yield_constr: &mut RecursiveConstraintConsumer<F, D>,
     ) {
         let one = builder.one_extension();
@@ -421,8 +463,8 @@ impl<F: RichField + Extendable<D>, const D: usize> Stark<F, D> for Fq12ExpU64Sta
         let is_mul_col = c.start_flags_col + 3;
         let exp_val_col = c.start_flags_col + 5;
 
-        let lv = vars.local_values;
-        let nv = vars.next_values;
+        let lv = vars.get_local_values();
+        let nv = vars.get_next_values();
 
         let mut cur_col = 0;
         let a = read_fq12(lv, &mut cur_col);
@@ -445,7 +487,7 @@ impl<F: RichField + Extendable<D>, const D: usize> Stark<F, D> for Fq12ExpU64Sta
         // public inputs
         cur_col = 0;
         for i in (0..2 * c.num_io).step_by(2) {
-            let fq12_exp_io = read_fq12_exp_u64_io(vars.public_inputs, &mut cur_col);
+            let fq12_exp_io = read_fq12_exp_u64_io(vars.get_public_inputs(), &mut cur_col);
             let is_ith_input = lv[get_pulse_col(c.start_io_pulses_col, i)];
             let is_ith_output = lv[get_pulse_col(c.start_io_pulses_col, i + 1)];
             (0..12).for_each(|i| {
@@ -536,18 +578,23 @@ impl<F: RichField + Extendable<D>, const D: usize> Stark<F, D> for Fq12ExpU64Sta
         eval_flags_u64_circuit(
             builder,
             yield_constr,
-            vars.local_values,
-            vars.next_values,
+            vars.get_local_values(),
+            vars.get_next_values(),
             c.start_flags_col,
         );
         eval_pulse_circuit(
             builder,
             yield_constr,
-            vars.local_values,
-            vars.next_values,
+            vars.get_local_values(),
+            vars.get_next_values(),
             c.start_io_pulses_col,
             get_pulse_u64_positions(c.num_io),
         );
+        let vars = StarkEvaluationTargets {
+            local_values: vars.get_local_values(),
+            next_values: vars.get_next_values(),
+            public_inputs: vars.get_public_inputs(),
+        };
         eval_split_u16_range_check_circuit(
             builder,
             vars,
@@ -559,14 +606,6 @@ impl<F: RichField + Extendable<D>, const D: usize> Stark<F, D> for Fq12ExpU64Sta
 
     fn constraint_degree(&self) -> usize {
         3
-    }
-
-    fn permutation_pairs(&self) -> Vec<PermutationPair> {
-        let c = self.constants();
-        split_u16_range_check_pairs(
-            c.start_lookups_col,
-            c.start_range_check_col..c.end_range_check_col,
-        )
     }
 }
 
@@ -629,14 +668,9 @@ mod tests {
         let now = Instant::now();
         let trace = stark.generate_trace(&inputs);
         let pi = stark.generate_public_inputs(&inputs);
-        let inner_proof = prove::<F, C, S, D>(
-            stark,
-            &inner_config,
-            trace,
-            pi.try_into().unwrap(),
-            &mut TimingTree::default(),
-        )
-        .unwrap();
+        let inner_proof =
+            prove::<F, C, S, D>(stark, &inner_config, trace, &pi, &mut TimingTree::default())
+                .unwrap();
         verify_stark_proof(stark, inner_proof.clone(), &inner_config).unwrap();
         println!("end stark proof generation: {:?}", now.elapsed());
 

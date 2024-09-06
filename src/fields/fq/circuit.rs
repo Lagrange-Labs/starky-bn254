@@ -11,10 +11,12 @@ use plonky2::{
         target::Target,
         witness::{PartialWitness, PartitionWitness},
     },
+    plonk::circuit_data::CommonCircuitData,
     plonk::{
         circuit_builder::CircuitBuilder,
         config::{AlgebraicHasher, GenericConfig},
     },
+    util::serialization::IoResult,
     util::{serialization::Buffer, timing::TimingTree},
 };
 use plonky2_bn254::fields::{fq_target::FqTarget, u256_target::U256Target};
@@ -28,7 +30,9 @@ use starky::{
     verifier::verify_stark_proof,
 };
 
-use crate::fields::fq::exp::{read_fq_exp_io, FqExpStark, FQ_EXP_IO_LEN};
+use crate::fields::fq::exp::{
+    num_columns, num_public_inputs, read_fq_exp_io, FqExpStark, FQ_EXP_IO_LEN,
+};
 use crate::{fields::fq::exp::FqExpIONative, utils::utils::get_u256_biguint};
 pub const FQ_EXP_INPUT_LEN: usize = 3 * 8;
 
@@ -81,204 +85,6 @@ impl<F: RichField + Extendable<D>, const D: usize> FqExpInputTarget<F, D> {
         self.offset.set_witness(pw, &value.offset);
         self.exp_val.set_witness(pw, &value.exp_val);
     }
-}
-
-fn fq_exp_circuit_with_proof_target<
-    F: RichField + Extendable<D>,
-    C: GenericConfig<D, F = F>,
-    const D: usize,
->(
-    builder: &mut CircuitBuilder<F, D>,
-    log_num_io: usize,
-) -> (
-    Vec<FqExpInputTarget<F, D>>,
-    Vec<FqTarget<F, D>>,
-    StarkProofWithPublicInputsTarget<D>,
-)
-where
-    <C as GenericConfig<D>>::Hasher: AlgebraicHasher<F>,
-{
-    assert!(log_num_io >= 7);
-    let num_io = 1 << log_num_io;
-    let stark = FqExpStark::<F, D>::new(num_io);
-    let inner_config = stark.config();
-    let degree_bits = 9 + log_num_io;
-    let starky_proof_t =
-        add_virtual_stark_proof_with_pis(builder, stark, &inner_config, degree_bits);
-    verify_stark_proof_circuit::<F, C, _, D>(builder, stark, &starky_proof_t, &inner_config);
-    assert!(starky_proof_t.public_inputs.len() == FQ_EXP_IO_LEN * num_io);
-    let mut cur_col = 0;
-    let mut inputs = vec![];
-    let mut outputs = vec![];
-    let pi = starky_proof_t.public_inputs.clone();
-    for _ in 0..num_io {
-        let io = read_fq_exp_io(&pi, &mut cur_col);
-        let x = FqTarget::from_limbs(builder, &io.x);
-        let offset = FqTarget::from_limbs(builder, &io.offset);
-        let output = FqTarget::from_limbs(builder, &io.output);
-        let exp_val = U256Target::<F, D>::from_vec(&io.exp_val);
-        let input = FqExpInputTarget { x, offset, exp_val };
-        inputs.push(input);
-        outputs.push(output);
-    }
-    (inputs, outputs, starky_proof_t)
-}
-
-#[derive(Clone, Debug)]
-pub struct FqExpOutputGenerator<F: RichField + Extendable<D>, const D: usize> {
-    pub input: FqExpInputTarget<F, D>,
-    pub output: FqTarget<F, D>,
-}
-
-impl<F, const D: usize> SimpleGenerator<F> for FqExpOutputGenerator<F, D>
-where
-    F: RichField + Extendable<D>,
-{
-    fn dependencies(&self) -> Vec<Target> {
-        self.input.to_vec()
-    }
-
-    fn run_once(&self, pw: &PartitionWitness<F>, out_buffer: &mut GeneratedValues<F>) {
-        let x = get_u256_biguint(pw, &self.input.x.to_vec());
-        let offset = get_u256_biguint(pw, &self.input.offset.to_vec());
-        let exp_val = get_u256_biguint(pw, &self.input.exp_val.to_vec());
-        let x = Fq::from(x);
-        let offset = Fq::from(offset);
-        use ark_ff::Field;
-        let output = x.pow(&exp_val.to_u64_digits()) * offset;
-        self.output.set_witness(out_buffer, &output);
-    }
-
-    fn id(&self) -> String {
-        "FqExpOutputGenerator".to_string()
-    }
-    fn serialize(&self, _dst: &mut Vec<u8>) -> plonky2::util::serialization::IoResult<()> {
-        todo!()
-    }
-    fn deserialize(_src: &mut Buffer) -> plonky2::util::serialization::IoResult<Self> {
-        todo!()
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct FqExpStarkyProofGenerator<
-    F: RichField + Extendable<D>,
-    C: GenericConfig<D, F = F>,
-    const D: usize,
-> {
-    pub inputs: Vec<FqExpInputTarget<F, D>>,
-    pub outputs: Vec<FqTarget<F, D>>,
-    pub starky_proof: StarkProofWithPublicInputsTarget<D>,
-    _config: std::marker::PhantomData<C>,
-}
-
-impl<F, C, const D: usize> SimpleGenerator<F> for FqExpStarkyProofGenerator<F, C, D>
-where
-    F: RichField + Extendable<D>,
-    C: GenericConfig<D, F = F> + 'static,
-    C::Hasher: AlgebraicHasher<F>,
-{
-    fn dependencies(&self) -> Vec<Target> {
-        let mut targets = vec![];
-        self.inputs.iter().cloned().for_each(|input| {
-            targets.extend(input.to_vec());
-        });
-        targets
-    }
-    fn run_once(&self, pw: &PartitionWitness<F>, out_buffer: &mut GeneratedValues<F>) {
-        let ios_native = self
-            .inputs
-            .iter()
-            .cloned()
-            .map(|input| {
-                let x = get_u256_biguint(pw, &input.x.to_vec());
-                let offset = get_u256_biguint(pw, &input.offset.to_vec());
-                let exp_val = get_u256_biguint(pw, &input.exp_val.to_vec());
-                let x = Fq::from(x);
-                let offset = Fq::from(offset);
-                use ark_ff::Field;
-                let output = x.pow(&exp_val.to_u64_digits()) * offset;
-                let mut exp_val_u32 = exp_val.to_u32_digits();
-                exp_val_u32.extend(vec![0; 8 - exp_val_u32.len()]);
-                FqExpIONative {
-                    x,
-                    offset,
-                    exp_val: exp_val_u32.try_into().unwrap(),
-                    output,
-                }
-            })
-            .collect_vec();
-
-        let num_io = ios_native.len();
-        let stark = FqExpStark::<F, D>::new(num_io);
-        let inner_config = stark.config();
-        let trace = stark.generate_trace(&ios_native);
-        let pi = stark.generate_public_inputs(&ios_native);
-        let inner_proof = prove::<F, C, _, D>(
-            stark,
-            &inner_config,
-            trace,
-            pi.try_into().unwrap(),
-            &mut TimingTree::default(),
-        )
-        .unwrap();
-        verify_stark_proof(stark, inner_proof.clone(), &inner_config).unwrap();
-        set_stark_proof_with_pis_target(out_buffer, &self.starky_proof, &inner_proof);
-    }
-
-    fn id(&self) -> String {
-        "FqExpStarkyProofGenerator".to_string()
-    }
-    fn serialize(&self, _dst: &mut Vec<u8>) -> plonky2::util::serialization::IoResult<()> {
-        todo!()
-    }
-    fn deserialize(_src: &mut Buffer) -> plonky2::util::serialization::IoResult<Self> {
-        todo!()
-    }
-}
-
-pub fn fq_exp_circuit<
-    F: RichField + Extendable<D>,
-    C: GenericConfig<D, F = F> + 'static,
-    const D: usize,
->(
-    builder: &mut CircuitBuilder<F, D>,
-    inputs: &[FqExpInputTarget<F, D>],
-) -> Vec<FqTarget<F, D>>
-where
-    C::Hasher: AlgebraicHasher<F>,
-{
-    let n = inputs.len();
-    let next_power_of_two = n.next_power_of_two();
-    assert!(next_power_of_two >= 128);
-    let mut inputs = inputs.to_vec();
-    inputs.resize(next_power_of_two, inputs.last().unwrap().clone());
-    let log_num_io = next_power_of_two.trailing_zeros() as usize;
-
-    let (inputs_constr, outputs, starky_proof) =
-        fq_exp_circuit_with_proof_target::<F, C, D>(builder, log_num_io);
-
-    for (input_c, input) in inputs_constr.iter().zip(inputs.iter()) {
-        FqExpInputTarget::connect(builder, input_c, input);
-    }
-
-    for (input, output) in inputs.iter().zip(outputs.iter()) {
-        let output_generator = FqExpOutputGenerator {
-            input: input.to_owned(),
-            output: output.to_owned(),
-        };
-        builder.add_simple_generator(output_generator);
-    }
-
-    let proof_generator = FqExpStarkyProofGenerator::<F, C, D> {
-        inputs: inputs.to_vec(),
-        outputs: outputs.clone(),
-        starky_proof,
-        _config: PhantomData,
-    };
-    builder.add_simple_generator(proof_generator);
-
-    outputs[..n].to_vec()
 }
 
 #[cfg(test)]

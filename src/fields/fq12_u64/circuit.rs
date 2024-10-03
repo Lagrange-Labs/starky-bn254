@@ -18,13 +18,15 @@ use plonky2::{
         target::Target,
         witness::{PartialWitness, PartitionWitness, Witness, WitnessWrite},
     },
-    plonk::circuit_data::CommonCircuitData,
     plonk::{
         circuit_builder::CircuitBuilder,
+        circuit_data::CommonCircuitData,
         config::{AlgebraicHasher, GenericConfig},
     },
-    util::serialization::IoResult,
-    util::{serialization::Buffer, timing::TimingTree},
+    util::{
+        serialization::{Buffer, IoResult, Read, Write},
+        timing::TimingTree,
+    },
 };
 use plonky2_bn254::fields::{fq12_target::Fq12Target, fq_target::FqTarget, native::MyFq12};
 use starky::{
@@ -46,7 +48,7 @@ pub struct Fq12ExpU64Input {
     pub exp_val: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Fq12ExpU64InputTarget<F: RichField + Extendable<D>, const D: usize> {
     pub x: Fq12Target<F, D>,
     pub offset: Fq12Target<F, D>,
@@ -91,9 +93,27 @@ impl<F: RichField + Extendable<D>, const D: usize> Fq12ExpU64InputTarget<F, D> {
         self.offset.set_witness(pw, &value.offset);
         pw.set_target(self.exp_val, F::from_canonical_u64(value.exp_val));
     }
+
+    pub fn serialize(
+        &self,
+        dst: &mut Vec<u8>,
+        common_data: &CommonCircuitData<F, D>,
+    ) -> IoResult<()> {
+        self.x.serialize(dst, common_data)?;
+        self.offset.serialize(dst, common_data)?;
+        dst.write_target(self.exp_val)
+    }
+
+    pub fn deserialize(src: &mut Buffer, common_data: &CommonCircuitData<F, D>) -> IoResult<Self> {
+        let x = Fq12Target::deserialize(src, common_data)?;
+        let offset = Fq12Target::deserialize(src, common_data)?;
+        let exp_val = src.read_target()?;
+
+        Ok(Self { x, offset, exp_val })
+    }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Fq12ExpU64OutputGenerator<F: RichField + Extendable<D>, const D: usize> {
     pub input: Fq12ExpU64InputTarget<F, D>,
     pub output: Fq12Target<F, D>,
@@ -133,15 +153,17 @@ where
     fn id(&self) -> String {
         "Fq12ExpU64OutputGenerator".to_string()
     }
-    fn serialize(
-        &self,
-        _dst: &mut Vec<u8>,
-        _common_data: &CommonCircuitData<F, D>,
-    ) -> IoResult<()> {
-        todo!()
+
+    fn serialize(&self, dst: &mut Vec<u8>, common_data: &CommonCircuitData<F, D>) -> IoResult<()> {
+        self.input.serialize(dst, common_data)?;
+        self.output.serialize(dst, common_data)
     }
-    fn deserialize(_src: &mut Buffer, _common_data: &CommonCircuitData<F, D>) -> IoResult<Self> {
-        todo!()
+
+    fn deserialize(src: &mut Buffer, common_data: &CommonCircuitData<F, D>) -> IoResult<Self> {
+        let input = Fq12ExpU64InputTarget::deserialize(src, common_data)?;
+        let output = Fq12Target::deserialize(src, common_data)?;
+
+        Ok(Self { input, output })
     }
 }
 
